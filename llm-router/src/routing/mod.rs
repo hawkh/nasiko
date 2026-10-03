@@ -26,7 +26,9 @@ pub mod classifier;
 // `ClassifierSalienceGate`.
 mod patterns;
 pub mod pricing_sync;
+pub mod laya;
 pub mod registry;
+pub mod request_classifier;
 pub mod salience;
 mod salience_classifier;
 
@@ -35,6 +37,9 @@ pub use cache::{CachedDecision, DecisionCache, NoopCache, RedisCache};
 pub use cells::{CellStore, InMemoryCellStore, PgCellStore};
 pub use classifier::{RequestType, Tier, classify, signal};
 pub use registry::{PgTierRegistry, TierRegistry};
+pub use request_classifier::{
+    Classification, ClassifierInput, ClassifierSource, RegexClassifier, RequestClassifier,
+};
 pub use salience::{AllowAllGate, ClassifierSalienceGate, SalienceGate};
 
 /// Which precedence level produced a routing decision — emitted as a structured tag so we

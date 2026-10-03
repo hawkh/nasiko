@@ -33,6 +33,7 @@ use rand::Rng;
 use rand_distr::{Beta, Distribution};
 
 use super::patterns::{CATEGORY_PATTERNS, NEGATIVE_SIGNALS, POSITIVE_SIGNALS};
+use super::request_classifier::{Classification, NEUTRAL_LEVEL};
 
 /// Coarse model strength tier. Tier 1 = most capable (complex queries), Tier 3 = smallest
 /// (very simple queries), Tier 2 = in between.
@@ -164,6 +165,12 @@ const TIER_ARMS: [TierArm; 3] = [
 /// patterns wins, ties broken by declaration order, defaulting to `General`. Port of
 /// `categories.rs::classify`.
 pub fn classify_request_type(text: &str) -> RequestType {
+    classify_request_type_scored(text).0
+}
+
+/// [`classify_request_type`] plus the winning category's vote count — the regex
+/// classifier's only evidence of how sure it is.
+pub fn classify_request_type_scored(text: &str) -> (RequestType, usize) {
     let mut best = RequestType::General;
     let mut best_score = 0usize;
     for (rt, pats) in CATEGORY_PATTERNS.iter() {
@@ -173,7 +180,7 @@ pub fn classify_request_type(text: &str) -> RequestType {
             best = *rt;
         }
     }
-    best
+    (best, best_score)
 }
 
 // --------------------------------------------------------------------------
@@ -251,6 +258,62 @@ pub fn pick_model_thompson<R: Rng + ?Sized>(
     w_cost: f64,
     rng: &mut R,
 ) -> Tier {
+    pick_model_thompson_shifted(cells, request_type, 0.0, w_quality, w_cost, rng)
+}
+
+/// How strongly a confident complexity estimate moves the cold-start priors (`K`).
+pub const COMPLEXITY_PRIOR_WEIGHT: f64 = 0.3;
+
+/// The cold-start prior shift a [`Classification`] asks for: positive favours Tier1,
+/// negative Tier3. Zero at the neutral level or with no certainty — so the regex
+/// classifier, whose complexity is neutral, never moves a prior.
+pub fn prior_shift(c: &Classification) -> f64 {
+    c.complexity_confidence * COMPLEXITY_PRIOR_WEIGHT * (c.complexity_level - NEUTRAL_LEVEL) / 2.0
+}
+
+/// Apply `shift` to one tier's prior: up for Tier1, down for Tier3, Tier2 untouched, clamped
+/// to the same bounds as [`cold_start_prior`]. Only the prior moves — learned cells still
+/// dominate once a cell has real samples.
+fn shifted_prior(prior: f64, tier: Tier, shift: f64) -> f64 {
+    let p = match tier {
+        Tier::Tier1 => prior + shift,
+        Tier::Tier2 => prior,
+        Tier::Tier3 => prior - shift,
+    };
+    p.clamp(0.05, 0.95)
+}
+
+/// Thompson-sample a tier for a full [`Classification`] — Level 3's entry point. With a
+/// regex classification this is exactly [`pick_model_thompson`] on its request type.
+pub fn pick_tier<R: Rng + ?Sized>(c: &Classification, cells: &CellMap, rng: &mut R) -> Tier {
+    pick_model_thompson_shifted(
+        cells,
+        c.request_type,
+        prior_shift(c),
+        DEFAULT_W_QUALITY,
+        DEFAULT_W_COST,
+        rng,
+    )
+}
+
+/// A tier's relative cost (the bandit's cost arm) — exposed for offline evaluation.
+pub fn tier_cost(tier: Tier) -> f64 {
+    TIER_ARMS
+        .iter()
+        .find(|a| a.tier == tier)
+        .map_or(0.0, |a| a.cost)
+}
+
+/// [`pick_model_thompson`] with each tier's cold-start prior moved by `shift` (see
+/// [`shifted_prior`]). `shift == 0.0` leaves the priors — and the sampled tier — unchanged.
+pub fn pick_model_thompson_shifted<R: Rng + ?Sized>(
+    cells: &CellMap,
+    request_type: RequestType,
+    shift: f64,
+    w_quality: f64,
+    w_cost: f64,
+    rng: &mut R,
+) -> Tier {
     let lo = TIER_ARMS
         .iter()
         .map(|a| a.cost)
@@ -264,7 +327,11 @@ pub fn pick_model_thompson<R: Rng + ?Sized>(
     let mut best = TIER_ARMS[0].tier;
     let mut best_score = f64::NEG_INFINITY;
     for arm in TIER_ARMS.iter() {
-        let prior = cold_start_prior(arm.quality_tier, arm.strengths, request_type);
+        let prior = shifted_prior(
+            cold_start_prior(arm.quality_tier, arm.strengths, request_type),
+            arm.tier,
+            shift,
+        );
         let (successes, failures) = match cells.get(&(arm.tier, request_type)) {
             Some(cell) => {
                 let s = cell.quality_mean * cell.samples as f64;
@@ -329,6 +396,79 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+
+    // --- complexity-weighted prior shift ---
+
+    use crate::routing::request_classifier::{ClassifierSource, RegexClassifier};
+
+    fn laya_like(level: f64) -> Classification {
+        Classification {
+            request_type: RequestType::General,
+            complexity: level.round() as u8 + 1,
+            complexity_level: level,
+            complexity_confidence: 1.0,
+            confidence: 0.9,
+            source: ClassifierSource::Laya,
+        }
+    }
+
+    fn tier_counts(c: &Classification) -> HashMap<Tier, usize> {
+        let cells = CellMap::new();
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut counts = HashMap::new();
+        for _ in 0..2_000 {
+            *counts.entry(pick_tier(c, &cells, &mut rng)).or_default() += 1;
+        }
+        counts
+    }
+
+    /// The merge-safety guarantee: with the regex classifier, routing is unchanged.
+    #[test]
+    fn regex_classification_routes_exactly_like_classify() {
+        let cells = CellMap::new();
+        for q in [
+            "build me a python script that parses CSV",
+            "explain what this function does",
+            "how should I design this API?",
+            "draft an email to my team about the outage",
+            "hello there",
+        ] {
+            for seed in 0..200u64 {
+                let (expected, rt) =
+                    classify(q, "anthropic", &cells, &mut StdRng::seed_from_u64(seed));
+                let c = RegexClassifier::classify_query(q);
+                assert_eq!(c.request_type, rt);
+                assert_eq!(prior_shift(&c), 0.0);
+                assert_eq!(
+                    pick_tier(&c, &cells, &mut StdRng::seed_from_u64(seed)),
+                    expected,
+                    "{q} / {seed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn complexity_moves_the_tier_mix() {
+        let easy = tier_counts(&laya_like(0.0));
+        let mid = tier_counts(&laya_like(2.0));
+        let hard = tier_counts(&laya_like(4.0));
+        let n = |m: &HashMap<Tier, usize>, t| m.get(&t).copied().unwrap_or(0);
+        assert!(n(&hard, Tier::Tier1) > n(&mid, Tier::Tier1), "{hard:?} vs {mid:?}");
+        assert!(n(&easy, Tier::Tier3) > n(&mid, Tier::Tier3), "{easy:?} vs {mid:?}");
+    }
+
+    #[test]
+    fn shift_scales_with_certainty_and_priors_stay_bounded() {
+        let mut unsure = laya_like(4.0);
+        unsure.complexity_confidence = 0.0;
+        assert_eq!(prior_shift(&unsure), 0.0);
+        assert!((prior_shift(&laya_like(4.0)) - COMPLEXITY_PRIOR_WEIGHT).abs() < 1e-12);
+        assert!((prior_shift(&laya_like(0.0)) + COMPLEXITY_PRIOR_WEIGHT).abs() < 1e-12);
+        assert_eq!(shifted_prior(0.9, Tier::Tier1, 0.3), 0.95);
+        assert_eq!(shifted_prior(0.1, Tier::Tier3, 0.3), 0.05);
+        assert_eq!(shifted_prior(0.5, Tier::Tier2, 0.3), 0.5);
+    }
 
     // --- request-type classifier (ports of the reference self-test) ---
 
