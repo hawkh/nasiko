@@ -23,15 +23,16 @@ use std::time::{Duration, Instant};
 
 use nasiko_llm_router::ir::Message;
 use nasiko_llm_router::routing::classifier::{
-    COMPLEXITY_PRIOR_WEIGHT, CellMap, RequestType, Tier, pick_tier, tier_cost,
+    COMPLEXITY_PRIOR_WEIGHT, Cell, CellMap, RequestType, Tier, pick_tier, tier_cost, tier_prior,
+    update_cell,
 };
 use nasiko_llm_router::routing::laya::LayaClassifier;
 use nasiko_llm_router::routing::request_classifier::classify_input;
 use nasiko_llm_router::routing::{
     Classification, ClassifierInput, ClassifierSource, RegexClassifier, RequestClassifier,
 };
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -148,6 +149,162 @@ fn high_tier1(r: &Replay) -> String {
     match r.picks.get("high (4-5)") {
         Some([t1, t2, t3]) => pct(*t1, t1 + t2 + t3),
         None => "-".into(),
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Stage 3 — online learning simulation
+// ---------------------------------------------------------------------------------------
+
+/// Requests in one simulated stream, and independent streams averaged.
+const SIM_ROUNDS: usize = 3_000;
+const SIM_RUNS: u64 = 20;
+/// Share of turns whose next user message carries a feedback signal (`classifier::signal`
+/// is deliberately conservative, so most turns teach nothing).
+const FEEDBACK_RATE: f64 = 0.3;
+/// Report windows over the stream: cold start, warming up, warm.
+const WINDOWS: [(usize, usize); 3] = [(0, 300), (300, 1_500), (1_500, 3_000)];
+
+/// SYNTHETIC reward model: probability that a tier's answer satisfies a request of a given
+/// labelled complexity. Tier1 handles everything; weaker tiers degrade with difficulty.
+/// This is an assumption for the simulation, not a measurement.
+fn p_success(tier: Tier, complexity: u8) -> f64 {
+    let c = usize::from(complexity.clamp(1, 5)) - 1;
+    match tier {
+        Tier::Tier1 => [0.95, 0.95, 0.95, 0.95, 0.95][c],
+        Tier::Tier2 => [0.92, 0.90, 0.80, 0.50, 0.30][c],
+        Tier::Tier3 => [0.90, 0.75, 0.45, 0.20, 0.10][c],
+    }
+}
+
+/// How the learned cells are keyed: as in production `(tier, request_type)`, or additionally
+/// by the classifier's *predicted* complexity band (one `CellMap` per band).
+#[derive(Clone, Copy)]
+enum CellKey {
+    Type,
+    TypeAndPredictedBand,
+}
+
+fn predicted_band(c: &Classification) -> usize {
+    match c.complexity {
+        0..=2 => 0,
+        3 => 1,
+        _ => 2,
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct Window {
+    n: usize,
+    success: usize,
+    cost: f64,
+    hard: usize,
+    hard_t3: usize,
+}
+
+/// Stream requests drawn uniformly from `rows` through `pick_tier`, with real learning:
+/// the outcome is drawn from [`p_success`] for the request's *labelled* complexity, and
+/// (with probability [`FEEDBACK_RATE`]) folded into the cell of the tier and the type the
+/// decision was made under — exactly what the router's cache + `CellStore::observe` do.
+fn simulate(rows: &[&Row], scored: &[Scored], key: CellKey) -> [Window; 3] {
+    let mut windows = [Window::default(); 3];
+    for run in 0..SIM_RUNS {
+        let mut rng = StdRng::seed_from_u64(10_000 + run);
+        let mut cells: [CellMap; 3] = Default::default();
+        for t in 0..SIM_ROUNDS {
+            let i = rng.random_range(0..rows.len());
+            let (row, c) = (rows[i], &scored[i].classification);
+            let map = match key {
+                CellKey::Type => 0,
+                CellKey::TypeAndPredictedBand => predicted_band(c),
+            };
+            let (tier, rt) = pick_tier(c, &cells[map], &mut rng);
+            let ok = rng.random::<f64>() < p_success(tier, row.complexity);
+            if rng.random::<f64>() < FEEDBACK_RATE {
+                let cell = cells[map].entry((tier, rt)).or_insert(Cell {
+                    quality_mean: tier_prior(tier, rt),
+                    samples: 0,
+                });
+                *cell = update_cell(*cell, if ok { 1.0 } else { 0.0 });
+            }
+            if let Some(w) = WINDOWS.iter().position(|(a, b)| (*a..*b).contains(&t)) {
+                let w = &mut windows[w];
+                w.n += 1;
+                w.success += usize::from(ok);
+                w.cost += tier_cost(tier);
+                if row.complexity >= 4 {
+                    w.hard += 1;
+                    w.hard_t3 += usize::from(tier == Tier::Tier3);
+                }
+            }
+        }
+    }
+    windows
+}
+
+fn learning(out: &mut String, rows: &[&Row], regex: &[Scored], layas: &[Scored]) {
+    let _ = writeln!(
+        out,
+        "\n## Stage 3 — online learning simulation (Thompson sampling + learned cells)\n"
+    );
+    let _ = writeln!(
+        out,
+        "{SIM_RUNS} streams × {SIM_ROUNDS} requests drawn from this split; feedback on \
+         {:.0}% of turns, credited to the (tier, decision type) cell as the router does. \
+         **The reward model is synthetic** (P(success | tier, labelled complexity): Tier1 0.95 \
+         flat; Tier2 0.92→0.30; Tier3 0.90→0.10 from complexity 1→5) — it tests the \
+         *mechanism*, not real answer quality.\n",
+        FEEDBACK_RATE * 100.0
+    );
+    let _ = writeln!(
+        out,
+        "| variant | requests | success rate | mean tier cost | hard → Tier3 |"
+    );
+    let _ = writeln!(out, "|---|---|---|---|---|");
+    let rescored = |f: &dyn Fn(&Classification) -> Classification| -> Vec<Scored> {
+        layas
+            .iter()
+            .map(|s| Scored {
+                classification: f(&s.classification),
+                latency_ms: s.latency_ms,
+            })
+            .collect()
+    };
+    let argmax = rescored(&|c| Classification {
+        type_probabilities: None,
+        ..c.clone()
+    });
+    // Type ignored entirely: the bandit learns per predicted complexity band only.
+    let band_only = rescored(&|c| Classification {
+        request_type: RequestType::General,
+        type_probabilities: None,
+        ..c.clone()
+    });
+    let variants: [(&str, &[Scored], CellKey); 5] = [
+        ("regex, cells by type (main)", regex, CellKey::Type),
+        ("laya sampled type, cells by type", layas, CellKey::Type),
+        ("laya argmax type, cells by type", &argmax, CellKey::Type),
+        (
+            "laya sampled type, cells by type + predicted band",
+            layas,
+            CellKey::TypeAndPredictedBand,
+        ),
+        (
+            "laya, cells by predicted band only",
+            &band_only,
+            CellKey::TypeAndPredictedBand,
+        ),
+    ];
+    for (name, scored, key) in variants {
+        for ((a, b), w) in WINDOWS.iter().zip(simulate(rows, scored, key)) {
+            let _ = writeln!(
+                out,
+                "| {name} | {a}–{b} | {} | {:.2} | {} |",
+                pct(w.success, w.n),
+                w.cost / w.n as f64,
+                pct(w.hard_t3, w.hard)
+            );
+        }
     }
 }
 
@@ -406,6 +563,8 @@ async fn main() {
             );
         }
     }
+
+    learning(&mut out, &rows, &regex, &layas);
 
     let _ = writeln!(out, "\n## Per request\n");
     let _ = writeln!(

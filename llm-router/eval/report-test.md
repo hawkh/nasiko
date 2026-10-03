@@ -6,8 +6,8 @@ Laya: `http://localhost:8000`, checkpoint `multilingual`.
 
 | backend | type accuracy | complexity MAE | complexity ±1 | fallbacks | p50 ms | p95 ms |
 |---|---|---|---|---|---|---|
-| regex | 38.6% (27/70) | 1.19 | 62.9% | 0 | 0.4 | 1.5 |
-| laya | 50.0% (35/70) | 0.93 | 84.3% | 0 | 708.8 | 1119.5 |
+| regex | 38.6% (27/70) | 1.19 | 62.9% | 0 | 0.3 | 1.7 |
+| laya | 50.0% (35/70) | 0.93 | 84.3% | 0 | 592.2 | 1003.0 |
 
 Regex has no complexity signal: it always reports 3 (neutral), so its MAE is the cost of not knowing.
 
@@ -69,6 +69,28 @@ Regex has no complexity signal: it always reports 3 (neutral), so its MAE is the
 | sampled from p(type) | 0.7 | 3.44 | 21.5% | 7.6% | 18.2% |
 | sampled from p(type) | 1.0 | 3.43 | 20.0% | 7.3% | 19.0% |
 | sampled from p(type) | 1.5 | 3.36 | 19.2% | 6.7% | 19.2% |
+
+## Stage 3 — online learning simulation (Thompson sampling + learned cells)
+
+20 streams × 3000 requests drawn from this split; feedback on 30% of turns, credited to the (tier, decision type) cell as the router does. **The reward model is synthetic** (P(success | tier, labelled complexity): Tier1 0.95 flat; Tier2 0.92→0.30; Tier3 0.90→0.10 from complexity 1→5) — it tests the *mechanism*, not real answer quality.
+
+| variant | requests | success rate | mean tier cost | hard → Tier3 |
+|---|---|---|---|---|
+| regex, cells by type (main) | 0–300 | 74.0% | 2.81 | 37.7% |
+| regex, cells by type (main) | 300–1500 | 76.8% | 3.00 | 18.3% |
+| regex, cells by type (main) | 1500–3000 | 78.3% | 3.06 | 10.5% |
+| laya sampled type, cells by type | 0–300 | 77.1% | 3.37 | 24.3% |
+| laya sampled type, cells by type | 300–1500 | 75.2% | 2.90 | 26.1% |
+| laya sampled type, cells by type | 1500–3000 | 75.4% | 2.66 | 23.6% |
+| laya argmax type, cells by type | 0–300 | 76.2% | 3.21 | 25.2% |
+| laya argmax type, cells by type | 300–1500 | 75.4% | 2.89 | 25.3% |
+| laya argmax type, cells by type | 1500–3000 | 75.9% | 2.73 | 20.7% |
+| laya sampled type, cells by type + predicted band | 0–300 | 76.2% | 3.54 | 21.2% |
+| laya sampled type, cells by type + predicted band | 300–1500 | 77.7% | 3.44 | 20.5% |
+| laya sampled type, cells by type + predicted band | 1500–3000 | 78.0% | 3.44 | 17.1% |
+| laya, cells by predicted band only | 0–300 | 75.0% | 2.62 | 31.1% |
+| laya, cells by predicted band only | 300–1500 | 78.0% | 3.08 | 14.1% |
+| laya, cells by predicted band only | 1500–3000 | 79.0% | 3.17 | 7.6% |
 
 ## Per request
 
