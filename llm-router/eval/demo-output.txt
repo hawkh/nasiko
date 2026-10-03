@@ -1,0 +1,47 @@
+Nasiko LLM router — Level 3 request classifier, before (regex) vs after (Laya)
+Tier mix = what the router's Thompson sampler picks over 50 seeds, cold start.
+Tier costs 15 / 3 / 0.8 (Tier1 strongest).
+
+━━ 1. Same request, two classifiers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ▶ hi!
+    regex  general               complexity 3 (conf 0.00)  type conf 0.30  | T1   2%            T3  64%  cost  1.83  [   124 ms]
+    laya   general               complexity 1 (conf 0.79)  type conf 0.67  | T1   0%            T3  86%  cost  1.11  [   570 ms]
+
+  ▶ What is the capital of France?
+    regex  factual_lookup        complexity 3 (conf 0.00)  type conf 0.80  | T1   2%            T3  64%  cost  1.83  [     3 ms]
+    laya   general               complexity 1 (conf 0.52)  type conf 0.96  | T1   0%            T3  76%  cost  1.33  [   627 ms]
+
+  ▶ Implement an LRU cache in Rust with O(1) get and put, generic over key and value types.
+    regex  general               complexity 3 (conf 0.00)  type conf 0.30  | T1   2%            T3  64%  cost  1.83  [     3 ms]
+    laya   code_generation       complexity 4 (conf 0.15)  type conf 0.76  | T1  24% ██         T3  32%  cost  5.18  [   735 ms]
+
+  ▶ Design a sharded, lock-free hash map in C++ with linearizable resize.
+    regex  general               complexity 3 (conf 0.00)  type conf 0.30  | T1   2%            T3  64%  cost  1.83  [     1 ms]
+    laya   code_generation       complexity 5 (conf 0.47)  type conf 0.94  | T1  34% ███        T3  14%  cost  6.77  [   650 ms]
+
+  ▶ How would you architect a real-time collaborative text editor like Google Docs?
+    regex  general               complexity 3 (conf 0.00)  type conf 0.30  | T1   2%            T3  64%  cost  1.83  [     1 ms]
+    laya   technical_design      complexity 4 (conf 0.17)  type conf 0.96  | T1  24% ██         T3  32%  cost  5.18  [   799 ms]
+
+  ▶ mujhe ek Python script likh ke do jo CSV file padhe aur har column ka average nikale
+    regex  general               complexity 3 (conf 0.00)  type conf 0.30  | T1   2%            T3  64%  cost  1.83  [     0 ms]
+    laya   factual_lookup        complexity 3 (conf 0.30)  type conf 0.77  | T1   2%            T3  70%  cost  1.70  [   706 ms]
+
+
+━━ 2. Context: a follow-up the regex cannot read ━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    [user] can you draft a toast for my sister's wedding
+    [assistant] Of course! Here's a draft: Friends and family, tonight we celebrate...
+  ▶ make it funnier and shorter
+    regex  general               complexity 3 (conf 0.00)  type conf 0.30  | T1   2%            T3  64%  cost  1.83  [     0 ms]
+    laya   writing               complexity 3 (conf 0.36)  type conf 1.00  | T1   2%            T3  26%  cost  2.67  [  1017 ms]
+
+
+━━ 3. Laya down: the request is still routed ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ▶ Design a sharded, lock-free hash map in C++ with linearizable resize.
+    regex  general               complexity 3 (conf 0.00)  type conf 0.30  | T1   2%            T3  64%  cost  1.83  [     0 ms]
+    laya   general               complexity 3 (conf 0.00)  type conf 0.30  | T1   2%            T3  64%  cost  1.83  [     2 ms]  ← fallback: unreachable
+
+  Laya unreachable → regex answer, no prior shift, request never fails.
