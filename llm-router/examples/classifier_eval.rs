@@ -162,7 +162,11 @@ fn summary(out: &mut String, name: &str, rows: &[&Row], scored: &[Scored]) {
 }
 
 fn calibration(out: &mut String, name: &str, rows: &[&Row], scored: &[Scored]) {
-    for (lo, hi, label) in [(0.0, 0.5, "< 0.5"), (0.5, 0.8, "0.5-0.8"), (0.8, 1.01, ">= 0.8")] {
+    for (lo, hi, label) in [
+        (0.0, 0.5, "< 0.5"),
+        (0.5, 0.8, "0.5-0.8"),
+        (0.8, 1.01, ">= 0.8"),
+    ] {
         let bucket: Vec<_> = rows
             .iter()
             .zip(scored)
@@ -301,7 +305,10 @@ async fn main() {
         );
     }
 
-    let _ = writeln!(out, "\n### Confidence calibration (type accuracy per confidence bucket)\n");
+    let _ = writeln!(
+        out,
+        "\n### Confidence calibration (type accuracy per confidence bucket)\n"
+    );
     let _ = writeln!(out, "| backend | confidence | n | accuracy |");
     let _ = writeln!(out, "|---|---|---|---|");
     calibration(&mut out, "regex", &rows, &regex);
