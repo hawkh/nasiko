@@ -179,7 +179,10 @@ mod tests {
             (3, 2.0, 0.0)
         );
         assert_eq!(c.source, ClassifierSource::Regex);
-        assert_eq!(RegexClassifier::classify_query("hello there").confidence, 0.3);
+        assert_eq!(
+            RegexClassifier::classify_query("hello there").confidence,
+            0.3
+        );
     }
 
     #[test]
@@ -187,7 +190,11 @@ mod tests {
         assert_eq!(ClassifierKind::from_label("laya"), ClassifierKind::Laya);
         assert_eq!(ClassifierKind::from_label(" LAYA "), ClassifierKind::Laya);
         for label in ["", "regex", "onnx", "garbage"] {
-            assert_eq!(ClassifierKind::from_label(label), ClassifierKind::Regex, "{label}");
+            assert_eq!(
+                ClassifierKind::from_label(label),
+                ClassifierKind::Regex,
+                "{label}"
+            );
         }
     }
 

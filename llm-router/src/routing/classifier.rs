@@ -454,8 +454,14 @@ mod tests {
         let mid = tier_counts(&laya_like(2.0));
         let hard = tier_counts(&laya_like(4.0));
         let n = |m: &HashMap<Tier, usize>, t| m.get(&t).copied().unwrap_or(0);
-        assert!(n(&hard, Tier::Tier1) > n(&mid, Tier::Tier1), "{hard:?} vs {mid:?}");
-        assert!(n(&easy, Tier::Tier3) > n(&mid, Tier::Tier3), "{easy:?} vs {mid:?}");
+        assert!(
+            n(&hard, Tier::Tier1) > n(&mid, Tier::Tier1),
+            "{hard:?} vs {mid:?}"
+        );
+        assert!(
+            n(&easy, Tier::Tier3) > n(&mid, Tier::Tier3),
+            "{easy:?} vs {mid:?}"
+        );
     }
 
     #[test]

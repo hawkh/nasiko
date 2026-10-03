@@ -58,7 +58,11 @@ impl LayaClassifier {
 }
 
 fn transport_reason(e: reqwest::Error) -> &'static str {
-    if e.is_timeout() { "timeout" } else { "unreachable" }
+    if e.is_timeout() {
+        "timeout"
+    } else {
+        "unreachable"
+    }
 }
 
 #[async_trait]
@@ -208,7 +212,11 @@ mod tests {
 
     fn assert_fallback(c: &Classification, reason: &'static str) {
         assert_eq!(c.source, ClassifierSource::Fallback(reason));
-        assert_eq!(c.request_type, RequestType::CodeUnderstanding, "regex answer");
+        assert_eq!(
+            c.request_type,
+            RequestType::CodeUnderstanding,
+            "regex answer"
+        );
         assert_eq!(c.complexity_confidence, 0.0, "no prior shift on fallback");
     }
 
@@ -302,12 +310,7 @@ mod tests {
     #[ignore = "needs a running laya-serve"]
     async fn live_laya_serve_answers_within_the_contract() {
         let url = std::env::var("LAYA_URL").unwrap_or_else(|_| "http://localhost:8000".into());
-        let c = LayaClassifier::new(
-            reqwest::Client::new(),
-            &url,
-            "",
-            Duration::from_secs(60),
-        );
+        let c = LayaClassifier::new(reqwest::Client::new(), &url, "", Duration::from_secs(60));
         for state in [
             "Latest request:\nhi!",
             "Latest request:\nDesign a sharded, lock-free hash map with linearizable resize.",

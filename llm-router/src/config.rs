@@ -101,6 +101,17 @@ pub struct GatewayConfig {
     /// retuned. Default 0.80.
     pub salience_high_threshold: f64,
 
+    /// Level 3 request classifier: `regex` (default — the original vote-counter) or `laya`
+    /// (the `laya-serve` sidecar at `laya_url`, falling back to regex per request on any
+    /// failure). Anything else logs a warning and uses regex.
+    pub request_classifier: String,
+    /// Base URL of the `laya-serve` sidecar (`REQUEST_CLASSIFIER=laya` only).
+    pub laya_url: String,
+    /// Per-request budget for a Laya call; past it the turn is classified by regex.
+    pub laya_timeout_ms: u64,
+    /// Bearer token for `laya-serve` when it runs with `LAYA_API_KEY`; empty sends none.
+    pub laya_api_key: String,
+
     /// Fleet-wide kill switch for payload compression. Compression is opted into **per agent**
     /// (`agents.compress_enabled`); this only lets an operator stop all of it at once without
     /// editing every agent's row. Default on, so a UI toggle takes effect without a deploy.
@@ -185,6 +196,10 @@ impl Default for GatewayConfig {
             salience_weights_path: String::new(),
             salience_low_threshold: 0.20,
             salience_high_threshold: 0.80,
+            request_classifier: "regex".into(),
+            laya_url: "http://laya:8000".into(),
+            laya_timeout_ms: 300,
+            laya_api_key: String::new(),
             compress_kill_switch: true,
             compress_min_bytes: 2048,
             compress_types: nasiko_compress::TypeMask::DEFAULT,
@@ -274,6 +289,13 @@ impl GatewayConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(d.salience_high_threshold),
+            request_classifier: env_or("REQUEST_CLASSIFIER", &d.request_classifier),
+            laya_url: env_or("LAYA_URL", &d.laya_url),
+            laya_timeout_ms: std::env::var("LAYA_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d.laya_timeout_ms),
+            laya_api_key: env_or("LAYA_API_KEY", &d.laya_api_key),
             compress_kill_switch: env_flag("TOKEN_COMPRESS_ENABLED", true),
             compress_min_bytes: env_usize("TOKEN_COMPRESS_MIN_BYTES", 2048),
             // A bad label must not silently widen or narrow what gets rewritten, so an

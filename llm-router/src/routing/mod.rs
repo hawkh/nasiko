@@ -7,11 +7,14 @@
 //! drift). The decision follows a fixed five-level precedence — see [`route_model`].
 //!
 //! ```text
-//! query + provider ──► classify() ──► Tier ──► registry::model_for(provider, Tier) ──► model
+//! query + context ──► RequestClassifier ──► (type, complexity) ──► pick_tier() ──► Tier
+//!                 ──► registry::model_for(provider, Tier) ──► model
 //! ```
 //!
-//! The [classifier](classifier::classify) buckets the query into a request type and
-//! Thompson-samples a [`Tier`] over the provider's learned quality [cells](cells); feedback
+//! A [`RequestClassifier`] (regex by default, or the [Laya](laya) sidecar) buckets the query
+//! into a request type and estimates its complexity; [`classifier::pick_tier`]
+//! Thompson-samples a [`Tier`] over the provider's learned quality [cells](cells), with a
+//! confident complexity estimate nudging the cold-start priors toward Tier1 or Tier3; feedback
 //! from the user's next turn ([`classifier::signal`]) is folded back into those cells, so the
 //! router learns which tier suffices for which kind of query. See [`route_model`].
 
@@ -24,9 +27,9 @@ pub mod classifier;
 // The salience classifier itself — feature engine, weight loading, scoring, banding.
 // Private to `routing`: only `salience.rs` (a sibling module) uses it directly, via
 // `ClassifierSalienceGate`.
+pub mod laya;
 mod patterns;
 pub mod pricing_sync;
-pub mod laya;
 pub mod registry;
 pub mod request_classifier;
 pub mod salience;
@@ -88,6 +91,9 @@ pub struct RouteInputs<'a> {
     pub signals: &'a BoundarySignals,
     /// The query to classify (latest user message text). `None` disables classification.
     pub query: Option<&'a str>,
+    /// The query plus recent context ([`request_classifier::classify_input`]) for
+    /// model-backed classifiers; `None` ⇒ they read the query alone.
+    pub classifier_state: Option<&'a str>,
 }
 
 /// The outcome of routing: the model to call and how it was chosen.
@@ -129,6 +135,7 @@ pub async fn route_model(
     registry: &dyn TierRegistry,
     cell_store: &dyn CellStore,
     gate: &dyn SalienceGate,
+    classifier: &dyn RequestClassifier,
     inputs: &RouteInputs<'_>,
 ) -> RouteDecision {
     tracing::info!(
@@ -250,14 +257,38 @@ pub async fn route_model(
                 agent_id = %inputs.agent_id, %conv_id, provider = %inputs.provider,
                 "route_model: LEVEL 3 (Classified) — at fireable boundary with a query; invoking classifier"
             );
-            // Load the provider's learned quality, then Thompson-sample a tier. Production
-            // uses an entropy RNG (exploration drives learning); tests seed it. The RNG
-            // (`ThreadRng`) is `!Send`, so it is scoped to drop before the next `.await` — the
-            // handler future must stay `Send`.
+            // Classify (request type + complexity), load the provider's learned quality, then
+            // Thompson-sample a tier with the complexity-shifted priors. Production uses an
+            // entropy RNG (exploration drives learning); tests seed it. The RNG (`ThreadRng`)
+            // is `!Send`, so it is scoped to drop before the next `.await` — the handler
+            // future must stay `Send`.
+            let started = std::time::Instant::now();
+            let classification = classifier
+                .classify(&ClassifierInput {
+                    query,
+                    state: inputs.classifier_state.unwrap_or(query),
+                })
+                .await;
+            tracing::info!(
+                target: "nasiko::llm_router::classifier",
+                agent_id = %inputs.agent_id, %conv_id, provider = %inputs.provider,
+                source = classification.source.as_str(),
+                fallback_reason = classification.source.fallback_reason(),
+                request_type = classification.request_type.as_str(),
+                complexity = classification.complexity,
+                complexity_level = classification.complexity_level,
+                complexity_confidence = classification.complexity_confidence,
+                confidence = classification.confidence,
+                prior_shift = classifier::prior_shift(&classification),
+                latency_ms = started.elapsed().as_millis() as u64,
+                query_preview = %query_preview(query),
+                "classifier: classified request"
+            );
+            let request_type = classification.request_type;
             let learned = cell_store.load(inputs.provider).await;
-            let (tier, request_type) = {
+            let tier = {
                 let mut rng = rand::rng();
-                classify(query, inputs.provider, &learned, &mut rng)
+                classifier::pick_tier(&classification, &learned, &mut rng)
             };
             // Per-config tier override takes priority over the global registry.
             let config_override = match tier {
@@ -537,6 +568,7 @@ mod tests {
             tier3_model: None,
             signals,
             query: Some("hello"),
+            classifier_state: None,
         }
     }
 
@@ -551,6 +583,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &AllowAllGate,
+            &RegexClassifier,
             &inputs("anthropic", &s, Some("pinned-model")),
         )
         .await;
@@ -568,6 +601,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &AllowAllGate,
+            &RegexClassifier,
             &inputs("anthropic", &s, None),
         )
         .await;
@@ -587,6 +621,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &AllowAllGate,
+            &RegexClassifier,
             &inputs("anthropic", &s, None),
         )
         .await;
@@ -617,6 +652,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &DenyGate,
+            &RegexClassifier,
             &inputs("anthropic", &s, None),
         )
         .await;
@@ -643,6 +679,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &DenyGate,
+            &RegexClassifier,
             &i,
         )
         .await;
@@ -663,6 +700,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &DenyGate,
+            &RegexClassifier,
             &i,
         )
         .await;
@@ -682,6 +720,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &DenyGate,
+            &RegexClassifier,
             &inputs("anthropic", &s, None),
         )
         .await;
@@ -704,6 +743,7 @@ mod tests {
             &test_support::StubRegistry,
             &cells,
             &AllowAllGate,
+            &RegexClassifier,
             &i,
         )
         .await;
@@ -731,6 +771,7 @@ mod tests {
             &test_support::StubRegistry,
             &cells,
             &AllowAllGate,
+            &RegexClassifier,
             &i,
         )
         .await;
@@ -748,6 +789,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &AllowAllGate,
+            &RegexClassifier,
             &inputs("gemini", &s, None),
         )
         .await;
@@ -766,6 +808,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &AllowAllGate,
+            &RegexClassifier,
             &inputs("anthropic", &s, None),
         )
         .await;
@@ -782,6 +825,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &AllowAllGate,
+            &RegexClassifier,
             &inputs("anthropic", &s, None),
         )
         .await;
@@ -800,6 +844,7 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &AllowAllGate,
+            &RegexClassifier,
             &inputs("anthropic", &s, None),
         )
         .await;
@@ -819,11 +864,60 @@ mod tests {
             &test_support::StubRegistry,
             &InMemoryCellStore::new(),
             &AllowAllGate,
+            &RegexClassifier,
             &i,
         )
         .await;
         assert_eq!(d.source, RouteSource::Default);
         assert_eq!(d.model, "cfg-model");
+    }
+
+    /// Counts calls and records the state it was given — proves *when* Level 3 classifies.
+    struct CountingClassifier {
+        calls: Mutex<Vec<String>>,
+    }
+    #[async_trait]
+    impl RequestClassifier for CountingClassifier {
+        async fn classify(&self, input: &ClassifierInput<'_>) -> Classification {
+            self.calls.lock().unwrap().push(input.state.to_string());
+            RegexClassifier::classify_query(input.query)
+        }
+    }
+
+    #[tokio::test]
+    async fn classifier_runs_only_on_a_fireable_cache_miss_with_the_context_state() {
+        let counting = CountingClassifier {
+            calls: Mutex::new(vec![]),
+        };
+        let route = |cache: FakeCache, phase: Phase| {
+            let counting = &counting;
+            async move {
+                let s = signals(Some("c1"), phase, Mode::FreeFlowing);
+                let mut i = inputs("anthropic", &s, None);
+                i.classifier_state = Some("Latest request:\nhello");
+                route_model(
+                    &cache,
+                    &test_support::StubRegistry,
+                    &InMemoryCellStore::new(),
+                    &AllowAllGate,
+                    counting,
+                    &i,
+                )
+                .await
+            }
+        };
+        route(FakeCache::empty(), Phase::Continue).await;
+        route(FakeCache::with_hit("cached"), Phase::Switch).await;
+        assert!(
+            counting.calls.lock().unwrap().is_empty(),
+            "a continue turn or a cache hit must not classify"
+        );
+        let d = route(FakeCache::empty(), Phase::Switch).await;
+        assert_eq!(d.source, RouteSource::Classified);
+        assert_eq!(
+            *counting.calls.lock().unwrap(),
+            vec!["Latest request:\nhello".to_string()]
+        );
     }
 
     #[test]
