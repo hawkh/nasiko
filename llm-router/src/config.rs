@@ -107,7 +107,10 @@ pub struct GatewayConfig {
     pub request_classifier: String,
     /// Base URL of the `laya-serve` sidecar (`REQUEST_CLASSIFIER=laya` only).
     pub laya_url: String,
-    /// Per-request budget for a Laya call; past it the turn is classified by regex.
+    /// Per-request budget for a Laya call; past it the turn is classified by regex. Default
+    /// 1500 ms covers the measured CPU p95 of a two-question call (~1.1–1.8 s on a laptop),
+    /// so a CPU sidecar actually answers; it is paid once per conversation boundary, and the
+    /// circuit breaker caps what a down sidecar costs. Lower it on GPU-backed sidecars.
     pub laya_timeout_ms: u64,
     /// Bearer token for `laya-serve` when it runs with `LAYA_API_KEY`; empty sends none.
     pub laya_api_key: String,
@@ -198,7 +201,7 @@ impl Default for GatewayConfig {
             salience_high_threshold: 0.80,
             request_classifier: "regex".into(),
             laya_url: "http://laya:8000".into(),
-            laya_timeout_ms: 300,
+            laya_timeout_ms: 1500,
             laya_api_key: String::new(),
             compress_kill_switch: true,
             compress_min_bytes: 2048,

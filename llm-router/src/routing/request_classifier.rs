@@ -40,7 +40,12 @@ impl ClassifierSource {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Classification {
+    /// The most likely request type.
     pub request_type: RequestType,
+    /// The classifier's full belief over request types (sums to 1), when it has one. The
+    /// tier sampler draws the type from it, so an unsure classifier routes like the mix it
+    /// is unsure between. `None` = all mass on `request_type` (regex).
+    pub type_probabilities: Option<Vec<(RequestType, f64)>>,
     /// 1 (trivial) ..= 5 (expert).
     pub complexity: u8,
     /// Expected complexity level index, 0.0 ..= 4.0 — `complexity - 1` before rounding.
@@ -77,6 +82,7 @@ impl RegexClassifier {
         let (request_type, votes) = classify_request_type_scored(query);
         Classification {
             request_type,
+            type_probabilities: None,
             complexity: 3,
             complexity_level: NEUTRAL_LEVEL,
             complexity_confidence: 0.0,

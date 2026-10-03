@@ -261,8 +261,12 @@ pub fn pick_model_thompson<R: Rng + ?Sized>(
     pick_model_thompson_shifted(cells, request_type, 0.0, w_quality, w_cost, rng)
 }
 
-/// How strongly a confident complexity estimate moves the cold-start priors (`K`).
-pub const COMPLEXITY_PRIOR_WEIGHT: f64 = 0.3;
+/// How strongly a confident complexity estimate moves the cold-start priors (`K`). Chosen on
+/// the eval's dev split (`examples/classifier_eval.rs`, decision-rule sweep): raising K from
+/// 0.3 to 1.0 cut hard requests sent to Tier3 and easy requests sent to Tier1 *and* lowered
+/// mean tier cost; past 1.0 the clamped priors saturate. At most ±K/2 per unit of
+/// confidence, and learned cells outweigh it once they have samples.
+pub const COMPLEXITY_PRIOR_WEIGHT: f64 = 1.0;
 
 /// The cold-start prior shift a [`Classification`] asks for: positive favours Tier1,
 /// negative Tier3. Zero at the neutral level or with no certainty — so the regex
@@ -283,17 +287,48 @@ fn shifted_prior(prior: f64, tier: Tier, shift: f64) -> f64 {
     p.clamp(0.05, 0.95)
 }
 
-/// Thompson-sample a tier for a full [`Classification`] — Level 3's entry point. With a
-/// regex classification this is exactly [`pick_model_thompson`] on its request type.
-pub fn pick_tier<R: Rng + ?Sized>(c: &Classification, cells: &CellMap, rng: &mut R) -> Tier {
-    pick_model_thompson_shifted(
+/// Thompson-sample a tier for a full [`Classification`] — Level 3's entry point.
+///
+/// The classifier's confidences become part of the sampled belief rather than being
+/// thresholded away: the request type is first **drawn from the classifier's distribution**
+/// ([`Classification::type_probabilities`]), then a tier is drawn from that type's posterior
+/// with the complexity-shifted priors ([`prior_shift`], already weighted by
+/// `complexity_confidence`). A classifier split 45/35 between two types routes like that
+/// mix, not like a confident call on the first. Returns the tier and the type it was decided
+/// under — the type the decision cache stores and feedback is later credited to.
+///
+/// A classification without a distribution (regex) is a point mass: no extra draw, so this
+/// is exactly [`pick_model_thompson`] on its request type, seed for seed.
+pub fn pick_tier<R: Rng + ?Sized>(
+    c: &Classification,
+    cells: &CellMap,
+    rng: &mut R,
+) -> (Tier, RequestType) {
+    let request_type = match &c.type_probabilities {
+        Some(probs) => sample_type(probs, rng).unwrap_or(c.request_type),
+        None => c.request_type,
+    };
+    let tier = pick_model_thompson_shifted(
         cells,
-        c.request_type,
+        request_type,
         prior_shift(c),
         DEFAULT_W_QUALITY,
         DEFAULT_W_COST,
         rng,
-    )
+    );
+    (tier, request_type)
+}
+
+/// Inverse-CDF draw from a distribution over request types; `None` if it is empty.
+fn sample_type<R: Rng + ?Sized>(probs: &[(RequestType, f64)], rng: &mut R) -> Option<RequestType> {
+    let mut u: f64 = rng.random();
+    for (rt, p) in probs {
+        if u < *p {
+            return Some(*rt);
+        }
+        u -= p;
+    }
+    probs.last().map(|(rt, _)| *rt)
 }
 
 /// A tier's relative cost (the bandit's cost arm) — exposed for offline evaluation.
@@ -404,6 +439,7 @@ mod tests {
     fn laya_like(level: f64) -> Classification {
         Classification {
             request_type: RequestType::General,
+            type_probabilities: None,
             complexity: level.round() as u8 + 1,
             complexity_level: level,
             complexity_confidence: 1.0,
@@ -417,7 +453,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let mut counts = HashMap::new();
         for _ in 0..2_000 {
-            *counts.entry(pick_tier(c, &cells, &mut rng)).or_default() += 1;
+            *counts.entry(pick_tier(c, &cells, &mut rng).0).or_default() += 1;
         }
         counts
     }
@@ -441,7 +477,7 @@ mod tests {
                 assert_eq!(prior_shift(&c), 0.0);
                 assert_eq!(
                     pick_tier(&c, &cells, &mut StdRng::seed_from_u64(seed)),
-                    expected,
+                    (expected, rt),
                     "{q} / {seed}"
                 );
             }
@@ -462,6 +498,55 @@ mod tests {
             n(&easy, Tier::Tier3) > n(&mid, Tier::Tier3),
             "{easy:?} vs {mid:?}"
         );
+    }
+
+    /// Laya's type confidences reach the decision: the type each decision is made under is
+    /// drawn in proportion to the classifier's belief, and a point mass never draws.
+    #[test]
+    fn decision_type_is_drawn_from_the_classifier_distribution() {
+        let cells = CellMap::new();
+        let mut c = laya_like(2.0);
+        c.request_type = RequestType::Writing;
+        c.type_probabilities = Some(vec![
+            (RequestType::Writing, 0.6),
+            (RequestType::CodeGeneration, 0.3),
+            (RequestType::General, 0.1),
+        ]);
+        let mut rng = StdRng::seed_from_u64(11);
+        let mut counts: HashMap<RequestType, usize> = HashMap::new();
+        let n = 10_000;
+        for _ in 0..n {
+            *counts.entry(pick_tier(&c, &cells, &mut rng).1).or_default() += 1;
+        }
+        for (rt, p) in [
+            (RequestType::Writing, 0.6),
+            (RequestType::CodeGeneration, 0.3),
+            (RequestType::General, 0.1),
+        ] {
+            let share = counts[&rt] as f64 / n as f64;
+            assert!((share - p).abs() < 0.02, "{rt:?}: {share} vs {p}");
+        }
+        c.type_probabilities = Some(vec![(RequestType::CodeGeneration, 1.0)]);
+        assert_eq!(
+            pick_tier(&c, &cells, &mut rng).1,
+            RequestType::CodeGeneration
+        );
+    }
+
+    /// The decision tracks the classifier's uncertainty: the more mass on a Tier1-strength
+    /// type, the more Tier1 — no cliff at the argmax.
+    #[test]
+    fn tier_mix_moves_smoothly_with_type_confidence() {
+        let tier1_share = |p_code: f64| {
+            let mut c = laya_like(2.0);
+            c.type_probabilities = Some(vec![
+                (RequestType::CodeGeneration, p_code),
+                (RequestType::FactualLookup, 1.0 - p_code),
+            ]);
+            tier_counts(&c).get(&Tier::Tier1).copied().unwrap_or(0)
+        };
+        let (low, mid, high) = (tier1_share(0.1), tier1_share(0.5), tier1_share(0.9));
+        assert!(low < mid && mid < high, "{low} < {mid} < {high}");
     }
 
     #[test]

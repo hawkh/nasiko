@@ -8,7 +8,7 @@
 //! Reads `llm-router/eval/requests.jsonl` (`{id, split, query, context, type, complexity}`),
 //! classifies every row with both backends through the router's own code
 //! ([`classify_input`] → [`RequestClassifier`]), then replays routing: each classification
-//! is fed to [`pick_tier`] under 50 fixed seeds with no learned cells — the cold-start
+//! is fed to [`pick_tier`] under 200 fixed seeds with no learned cells — the cold-start
 //! situation where the classifier decides alone. Prints a markdown report and writes it to
 //! `llm-router/eval/report-<split>.md`.
 //!
@@ -22,7 +22,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use nasiko_llm_router::ir::Message;
-use nasiko_llm_router::routing::classifier::{CellMap, RequestType, Tier, pick_tier, tier_cost};
+use nasiko_llm_router::routing::classifier::{
+    COMPLEXITY_PRIOR_WEIGHT, CellMap, RequestType, Tier, pick_tier, tier_cost,
+};
 use nasiko_llm_router::routing::laya::LayaClassifier;
 use nasiko_llm_router::routing::request_classifier::classify_input;
 use nasiko_llm_router::routing::{
@@ -33,7 +35,7 @@ use rand::rngs::StdRng;
 use serde::Deserialize;
 use serde_json::json;
 
-const SEEDS: u64 = 50;
+const SEEDS: u64 = 200;
 
 #[derive(Deserialize)]
 struct Turn {
@@ -109,7 +111,7 @@ fn replay(rows: &[&Row], scored: &[Scored]) -> Replay {
     for (row, s) in rows.iter().zip(scored) {
         let b = band(row.complexity);
         for seed in 0..SEEDS {
-            let tier = pick_tier(&s.classification, &cells, &mut StdRng::seed_from_u64(seed));
+            let (tier, _) = pick_tier(&s.classification, &cells, &mut StdRng::seed_from_u64(seed));
             r.picks.entry(b).or_default()[tier_idx(tier)] += 1;
             r.cost += tier_cost(tier);
             r.total += 1;
@@ -124,6 +126,29 @@ fn replay(rows: &[&Row], scored: &[Scored]) -> Replay {
         }
     }
     r
+}
+
+/// A Laya classification as a variant of the decision rule would see it: `argmax` drops the
+/// type distribution (decide on the top label only); `k` rescales the prior shift to weight
+/// `k` instead of the shipped `COMPLEXITY_PRIOR_WEIGHT` (the shift is linear in
+/// `complexity_confidence * K`, so scaling the confidence is exact).
+fn variant(c: &Classification, argmax: bool, k: f64) -> Classification {
+    Classification {
+        type_probabilities: if argmax {
+            None
+        } else {
+            c.type_probabilities.clone()
+        },
+        complexity_confidence: c.complexity_confidence * k / COMPLEXITY_PRIOR_WEIGHT,
+        ..c.clone()
+    }
+}
+
+fn high_tier1(r: &Replay) -> String {
+    match r.picks.get("high (4-5)") {
+        Some([t1, t2, t3]) => pct(*t1, t1 + t2 + t3),
+        None => "-".into(),
+    }
 }
 
 fn pct(n: usize, of: usize) -> String {
@@ -338,6 +363,49 @@ async fn main() {
     let _ = writeln!(out, "|---|---|---|---|---|");
     replay_rows(&mut out, "regex", &rr);
     replay_rows(&mut out, "laya", &lr);
+
+    let _ = writeln!(
+        out,
+        "\n### Decision-rule sweep (same Laya answers, different mapping onto tiers)\n"
+    );
+    let _ = writeln!(
+        out,
+        "| type used | K | mean tier cost | hard -> Tier3 | easy -> Tier1 | high band -> Tier1 |"
+    );
+    let _ = writeln!(out, "|---|---|---|---|---|---|");
+    let _ = writeln!(
+        out,
+        "| regex (baseline) | - | {:.2} | {} | {} | {} |",
+        rr.cost / rr.total as f64,
+        pct(rr.under, rr.under_of),
+        pct(rr.over, rr.over_of),
+        high_tier1(&rr)
+    );
+    for argmax in [true, false] {
+        for k in [0.0, 0.3, 0.5, 0.7, 1.0, 1.5] {
+            let scored: Vec<Scored> = layas
+                .iter()
+                .map(|s| Scored {
+                    classification: variant(&s.classification, argmax, k),
+                    latency_ms: s.latency_ms,
+                })
+                .collect();
+            let r = replay(&rows, &scored);
+            let _ = writeln!(
+                out,
+                "| {} | {k:.1} | {:.2} | {} | {} | {} |",
+                if argmax {
+                    "argmax"
+                } else {
+                    "sampled from p(type)"
+                },
+                r.cost / r.total as f64,
+                pct(r.under, r.under_of),
+                pct(r.over, r.over_of),
+                high_tier1(&r)
+            );
+        }
+    }
 
     let _ = writeln!(out, "\n## Per request\n");
     let _ = writeln!(

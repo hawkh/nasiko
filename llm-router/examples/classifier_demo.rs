@@ -51,7 +51,7 @@ fn tier_mix(c: &Classification) -> ([usize; 3], f64) {
     let mut mix = [0usize; 3];
     let mut cost = 0.0;
     for seed in 0..SEEDS {
-        let tier = pick_tier(c, &cells, &mut StdRng::seed_from_u64(seed));
+        let (tier, _) = pick_tier(c, &cells, &mut StdRng::seed_from_u64(seed));
         mix[match tier {
             Tier::Tier1 => 0,
             Tier::Tier2 => 1,

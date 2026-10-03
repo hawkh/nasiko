@@ -6,8 +6,8 @@ Laya: `http://localhost:8000`, checkpoint `multilingual`.
 
 | backend | type accuracy | complexity MAE | complexity ±1 | fallbacks | p50 ms | p95 ms |
 |---|---|---|---|---|---|---|
-| regex | 38.6% (27/70) | 1.19 | 62.9% | 0 | 0.4 | 1.9 |
-| laya | 50.0% (35/70) | 0.93 | 84.3% | 0 | 924.3 | 1826.1 |
+| regex | 38.6% (27/70) | 1.19 | 62.9% | 0 | 0.4 | 1.5 |
+| laya | 50.0% (35/70) | 0.93 | 84.3% | 0 | 708.8 | 1119.5 |
 
 Regex has no complexity signal: it always reports 3 (neutral), so its MAE is the cost of not knowing.
 
@@ -34,23 +34,41 @@ Regex has no complexity signal: it always reports 3 (neutral), so its MAE is the
 | laya | 0.5-0.8 | 22 | 54.5% |
 | laya | >= 0.8 | 30 | 56.7% |
 
-## Stage 2 — routing replay (50 seeds per request, cold start, tier costs 15 / 3 / 0.8)
+## Stage 2 — routing replay (200 seeds per request, cold start, tier costs 15 / 3 / 0.8)
 
 | backend | mean tier cost | hard (4-5) sent to Tier3 | easy (1-2) sent to Tier1 |
 |---|---|---|---|
-| regex | 2.40 | 57.1% | 4.2% |
-| laya | 3.53 | 28.1% | 8.1% |
+| regex | 2.71 | 56.5% | 7.0% |
+| laya | 3.43 | 20.0% | 7.3% |
 
 ### Tier mix by labelled complexity
 
 | backend | band | Tier1 | Tier2 | Tier3 |
 |---|---|---|---|---|
-| regex | high (4-5) | 7.1% | 35.7% | 57.1% |
-| regex | low (1-2) | 4.2% | 37.6% | 58.1% |
-| regex | mid (3) | 6.6% | 45.1% | 48.3% |
-| laya | high (4-5) | 23.9% | 48.0% | 28.1% |
-| laya | low (1-2) | 8.1% | 41.9% | 50.0% |
-| laya | mid (3) | 14.0% | 49.5% | 36.5% |
+| regex | high (4-5) | 10.1% | 33.4% | 56.5% |
+| regex | low (1-2) | 7.0% | 33.9% | 59.1% |
+| regex | mid (3) | 8.7% | 43.8% | 47.5% |
+| laya | high (4-5) | 19.0% | 61.0% | 20.0% |
+| laya | low (1-2) | 7.3% | 45.6% | 47.2% |
+| laya | mid (3) | 12.6% | 57.8% | 29.6% |
+
+### Decision-rule sweep (same Laya answers, different mapping onto tiers)
+
+| type used | K | mean tier cost | hard -> Tier3 | easy -> Tier1 | high band -> Tier1 |
+|---|---|---|---|---|---|
+| regex (baseline) | - | 2.71 | 56.5% | 7.0% | 10.1% |
+| argmax | 0.0 | 3.77 | 33.1% | 11.8% | 20.3% |
+| argmax | 0.3 | 3.61 | 27.3% | 9.1% | 22.9% |
+| argmax | 0.5 | 3.61 | 25.2% | 8.8% | 24.2% |
+| argmax | 0.7 | 3.58 | 23.0% | 7.8% | 25.5% |
+| argmax | 1.0 | 3.55 | 22.7% | 7.6% | 25.5% |
+| argmax | 1.5 | 3.50 | 21.5% | 6.8% | 26.5% |
+| sampled from p(type) | 0.0 | 3.76 | 26.0% | 10.9% | 15.5% |
+| sampled from p(type) | 0.3 | 3.47 | 25.3% | 8.4% | 15.9% |
+| sampled from p(type) | 0.5 | 3.46 | 23.2% | 8.1% | 17.1% |
+| sampled from p(type) | 0.7 | 3.44 | 21.5% | 7.6% | 18.2% |
+| sampled from p(type) | 1.0 | 3.43 | 20.0% | 7.3% | 19.0% |
+| sampled from p(type) | 1.5 | 3.36 | 19.2% | 6.7% | 19.2% |
 
 ## Per request
 

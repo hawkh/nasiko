@@ -275,6 +275,7 @@ pub async fn route_model(
                 source = classification.source.as_str(),
                 fallback_reason = classification.source.fallback_reason(),
                 request_type = classification.request_type.as_str(),
+                type_probabilities = ?classification.type_probabilities,
                 complexity = classification.complexity,
                 complexity_level = classification.complexity_level,
                 complexity_confidence = classification.complexity_confidence,
@@ -284,9 +285,10 @@ pub async fn route_model(
                 query_preview = %query_preview(query),
                 "classifier: classified request"
             );
-            let request_type = classification.request_type;
             let learned = cell_store.load(inputs.provider).await;
-            let tier = {
+            // `request_type` is the type the tier was sampled under (drawn from the
+            // classifier's distribution) — the one feedback must be credited to.
+            let (tier, request_type) = {
                 let mut rng = rand::rng();
                 classifier::pick_tier(&classification, &learned, &mut rng)
             };
