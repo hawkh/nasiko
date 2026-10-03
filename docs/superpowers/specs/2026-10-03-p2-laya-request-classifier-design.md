@@ -54,13 +54,13 @@ route_model ── Level 3 only (fireable boundary + cache miss + substantive) �
 
 | Unit | File | Responsibility |
 |---|---|---|
-| `Classification`, `ClassifierSource`, `RequestClassifier` trait, `RegexClassifier` | `routing/request_classifier.rs` (new) | The seam. Infallible `async fn classify(&self, input: &str) -> Classification`, mirroring `SalienceGate`. |
+| `Classification`, `ClassifierSource`, `RequestClassifier` trait, `RegexClassifier` | `routing/request_classifier.rs` (new) | The seam. Infallible `async fn classify(&self, input: &ClassifierInput) -> Classification`, mirroring `SalienceGate`. `ClassifierInput { query, state }`: regex reads only `query` (so default routing is byte-for-byte unchanged); model backends read `state` (query + context). |
 | `classify_input` | `routing/request_classifier.rs` | Pure, deterministic context string builder (§4.1). |
 | `LayaClassifier` | `routing/laya.rs` (new) | HTTP client for `laya-serve`; maps the response; all failures → regex fallback. |
 | `prior_shift` + shifted Thompson | `routing/classifier.rs` | Complexity-weighted prior adjustment (§4.3). |
-| Wiring | `routing/mod.rs`, `lib.rs`, `config.rs`, `handlers/chat.rs` | `LlmRouterCtx.request_classifier: Arc<dyn RequestClassifier>`; `route_model` takes `&dyn RequestClassifier`; `RouteInputs.classifier_input`. |
+| Wiring | `routing/mod.rs`, `lib.rs`, `config.rs`, `handlers/chat.rs` | `LlmRouterCtx.request_classifier: Arc<dyn RequestClassifier>`; `route_model` takes `&dyn RequestClassifier`; `RouteInputs.classifier_state`. |
 | Sidecar | `docker-compose.yml` | `laya` service under an opt-in compose profile. |
-| Evaluation | `llm-router/eval/` | `requests.jsonl` (labelled), `run_eval.py`. Not production code. |
+| Evaluation | `llm-router/eval/` | `requests.jsonl` (labelled), `examples/classifier_eval.rs` (runs the router's own classifiers + `pick_tier`). Not production code. |
 
 ```rust
 pub struct Classification {
